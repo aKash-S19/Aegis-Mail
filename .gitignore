@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Node
+node_modules/
+dist/
+build/
+
+# Vite
+.vite/
+
+# Tokens and credentials
+/tokens/
+credentials.json
+*.json
+*.pem
+
+# Environment
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# Editor swap
+*.swp
+
+__pycache__/
+*.pyc
+.venv/
+.env
+token.json
+credentials.json
+outputs/
+tokens/
+web/node_modules/
+web/dist/
+web/.env
+client_secret_*.json

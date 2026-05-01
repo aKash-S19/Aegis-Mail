@@ -1,0 +1,11 @@
+google-api-python-client>=2.124.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+bleach>=6.2.0
+itsdangerous>=2.2.0
+tinycss2>=1.4.0
+python-dotenv>=1.0.1
+requests>=2.32.0
+rich>=13.7.1
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
