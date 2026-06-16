@@ -27,6 +27,7 @@ class Settings:
     firebase_client_email: str | None
     firebase_api_key: str | None
     firebase_auth_domain: str | None
+    web_frontend_url: str = "http://localhost:5173"
 
 
 def load_settings() -> Settings:
@@ -69,4 +70,5 @@ def load_settings() -> Settings:
         firebase_client_email=os.getenv("FIREBASE_CLIENT_EMAIL") or None,
         firebase_api_key=os.getenv("FIREBASE_API_KEY") or None,
         firebase_auth_domain=os.getenv("FIREBASE_AUTH_DOMAIN") or None,
+        web_frontend_url=os.getenv("WEB_FRONTEND_URL", "http://localhost:5173"),
     )

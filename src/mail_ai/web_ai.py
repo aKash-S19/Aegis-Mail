@@ -32,7 +32,7 @@ from .models import EmailMessage, SummaryResult
 
 settings = load_settings()
 logger = logging.getLogger("mail_ai.web")
-FRONTEND_URL = os.getenv("WEB_FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = settings.web_frontend_url
 ALLOWED_ORIGINS = list(
     dict.fromkeys(
         [
@@ -41,9 +41,11 @@ ALLOWED_ORIGINS = list(
             "http://localhost:5174",
             "http://127.0.0.1:5173",
             "http://127.0.0.1:5174",
+            "https://aiaegismail.vercel.app",
         ]
     )
 )
+logger.info("CORS allowed origins: %s", ALLOWED_ORIGINS)
 REDIRECT_URI = os.getenv(
     "WEB_REDIRECT_URI", "http://localhost:8000/auth/google/callback"
 )
