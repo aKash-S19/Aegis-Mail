@@ -1,9 +1,9 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./banner.png">
+  <source media="(prefers-color-scheme: dark)" srcset="./banner1.png">
   <img alt="Aegis Mail" src="./banner.png">
 </picture>
 
-## Aegis Mail
+# Aegis Mail
 
 **Your AI inbox assistant — summarizes emails, explains context, and tells you what to do.**
 
