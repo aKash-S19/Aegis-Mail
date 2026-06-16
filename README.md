@@ -1,11 +1,27 @@
-# Aegis Mail — Gmail summarizer
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/your-org/aegis/main/web/public/logo2.png">
+  <img alt="Aegis Mail" src="https://raw.githubusercontent.com/your-org/aegis/main/web/public/logo2.png" width="80">
+</picture>
 
-Mail AI is a small project (CLI + web) that connects to Gmail, fetches messages, and uses AI to produce structured summaries and suggested actions.
+# Aegis Mail
 
-Key features
-- OAuth Google Sign-in (Gmail read-only scopes)
-- Fetch inbox messages (read/unread) with attachments
-- Render sanitized HTML email previews (inline styles preserved)
-- AI-powered structured summaries (Groq primary, Gemini optional, local fallback)
-- Cache summaries and store encrypted Gmail tokens in Supabase
-- Serve a React frontend (Vite) with a FastAPI backend
+**Your AI inbox assistant — summarizes emails, explains context, and tells you what to do.**
+
+Stop drowning in email. Aegis connects to your Gmail, runs every message through AI, and gives you a clean, structured breakdown: what it is, why you got it, what matters, and what you should do next.
+
+---
+
+## What it does
+
+- **AI summaries** — Groq (or Gemini) reads each email and distills it into a clear summary, topic, and category
+- **Action items** — extracts tasks, deadlines, and next steps
+- **Context & jargon** — explains why you received the email
+- **Classification** — flags marketing, newsletters, important messages, and potential concerns
+- **Full email rendering** — sanitized HTML preview or expandable plain text
+
+## Built with
+
+| Frontend | Backend | AI | Auth & Storage |
+|---|---|---|---|
+| React + Vite | FastAPI (Python) | Groq / Gemini / local fallback | Firebase Auth |
+| CSS (no framework) | Gmail API | Structured JSON extraction | Firestore / Supabase |
