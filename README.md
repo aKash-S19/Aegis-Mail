@@ -1,9 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/your-org/aegis/main/web/public/logo2.png">
-  <img alt="Aegis Mail" src="https://raw.githubusercontent.com/your-org/aegis/main/web/public/logo2.png" width="80">
+  <source media="(prefers-color-scheme: dark)" srcset="./banner.png">
+  <img alt="Aegis Mail" src="./banner.png">
 </picture>
-
-# Aegis Mail
 
 **Your AI inbox assistant — summarizes emails, explains context, and tells you what to do.**
 
