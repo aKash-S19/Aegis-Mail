@@ -18,14 +18,15 @@ class Settings:
     session_cookie_secure: bool
     allowed_hosts: list[str]
     session_max_age: int
-    supabase_url: str | None
-    supabase_service_role_key: str | None
-    supabase_anon_key: str | None
-    token_encryption_key: str | None
     gmail_credentials_path: Path
     gmail_token_path: Path
     output_dir: Path
     max_body_chars: int
+    firebase_project_id: str | None
+    firebase_private_key: str | None
+    firebase_client_email: str | None
+    firebase_api_key: str | None
+    firebase_auth_domain: str | None
 
 
 def load_settings() -> Settings:
@@ -57,14 +58,15 @@ def load_settings() -> Settings:
             if host.strip()
         ],
         session_max_age=int(os.getenv("SESSION_MAX_AGE", "604800")),
-        supabase_url=os.getenv("SUPABASE_URL") or None,
-        supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY") or None,
-        supabase_anon_key=os.getenv("SUPABASE_ANON_KEY") or None,
-        token_encryption_key=os.getenv("TOKEN_ENCRYPTION_KEY") or None,
         gmail_credentials_path=Path(
             os.getenv("GMAIL_CREDENTIALS_PATH", "credentials.json")
         ),
         gmail_token_path=Path(os.getenv("GMAIL_TOKEN_PATH", "token.json")),
         output_dir=Path(os.getenv("OUTPUT_DIR", "outputs")),
         max_body_chars=int(os.getenv("MAX_BODY_CHARS", "6000")),
+        firebase_project_id=os.getenv("FIREBASE_PROJECT_ID") or None,
+        firebase_private_key=os.getenv("FIREBASE_PRIVATE_KEY") or None,
+        firebase_client_email=os.getenv("FIREBASE_CLIENT_EMAIL") or None,
+        firebase_api_key=os.getenv("FIREBASE_API_KEY") or None,
+        firebase_auth_domain=os.getenv("FIREBASE_AUTH_DOMAIN") or None,
     )

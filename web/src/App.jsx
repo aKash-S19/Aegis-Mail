@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { signInWithGoogle, signOutFirebase, getStoredSession, getIdToken } from "./firebase";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const API_ORIGIN = new URL(API_BASE).origin;
@@ -18,14 +19,7 @@ function renderTextWithLinks(text) {
     const isLink = part.startsWith("http") || part.startsWith("mailto:");
     if (isLink) {
       return (
-        <a
-          key={`link-${index}`}
-          href={part}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          {part}
-        </a>
+        <a key={`link-${index}`} href={part} target="_blank" rel="noopener noreferrer">{part}</a>
       );
     }
     return <span key={`text-${index}`}>{part}</span>;
@@ -43,6 +37,87 @@ function renderBullets(items, emptyLabel) {
       ))}
     </ul>
   );
+}
+
+function renderSummary(text) {
+  const value = String(text || "");
+  if (!value) return null;
+  const lines = value.split("\n");
+  const elements = [];
+  let inBullets = false;
+  let bulletItems = [];
+  let titleRendered = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("- ")) {
+      inBullets = true;
+      bulletItems.push(trimmed.slice(2));
+      continue;
+    }
+
+    if (inBullets) {
+      elements.push(
+        <ul key={`bullets-${elements.length}`} className="summary-bullets">
+          {bulletItems.map((item, idx) => (
+            <li key={`sb-${idx}`}>{renderTextWithLinks(item)}</li>
+          ))}
+        </ul>
+      );
+      bulletItems = [];
+      inBullets = false;
+    }
+
+    if (!trimmed) {
+      elements.push(<div key={`spacer-${i}`} className="summary-spacer" />);
+      continue;
+    }
+
+    const lower = trimmed.toLowerCase();
+
+    if (!titleRendered && (lower.includes("simple summary") || lower.includes("summary of"))) {
+      elements.push(
+        <h3 key={`title-${i}`} className="summary-title">{renderTextWithLinks(trimmed)}</h3>
+      );
+      titleRendered = true;
+      continue;
+    }
+
+    if (lower.startsWith("overall:")) {
+      const rest = trimmed.slice("overall:".length).trim();
+      elements.push(
+        <p key={`overall-${i}`} className="summary-overall">
+          <strong>Overall:</strong> {renderTextWithLinks(rest)}
+        </p>
+      );
+      continue;
+    }
+
+    if (trimmed.endsWith(":") && trimmed.length < 40) {
+      elements.push(
+        <p key={`heading-${i}`} className="summary-subheading">{renderTextWithLinks(trimmed)}</p>
+      );
+      continue;
+    }
+
+    elements.push(
+      <p key={`line-${i}`} className="summary-line">{renderTextWithLinks(trimmed)}</p>
+    );
+  }
+
+  if (inBullets) {
+    elements.push(
+      <ul key={`bullets-end`} className="summary-bullets">
+        {bulletItems.map((item, idx) => (
+          <li key={`sb-${idx}`}>{renderTextWithLinks(item)}</li>
+        ))}
+      </ul>
+    );
+  }
+
+  return elements;
 }
 
 function formatBytes(value) {
@@ -74,9 +149,7 @@ function replaceCidImages(html, attachments, messageId) {
   if (!value || !attachments || attachments.length === 0) return value;
   const cidMap = new Map();
   attachments.forEach((attachment) => {
-    const contentId = String(attachment.content_id || "")
-      .replace(/^<|>$/g, "")
-      .toLowerCase();
+    const contentId = String(attachment.content_id || "").replace(/^<|>$/g, "").toLowerCase();
     if (!contentId) return;
     const url = buildAttachmentUrl(messageId, attachment);
     if (url) cidMap.set(contentId, url);
@@ -93,114 +166,83 @@ function replaceCidImages(html, attachments, messageId) {
 function buildHtmlDocument(html) {
   const body = String(html || "");
   const baseTag = "<base target=\"_blank\" />";
-  const styleTag = `<style>
-      body { margin: 0; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #1b1a13; background: #ffffff !important; }
-      img { max-width: 100%; height: auto; }
-      table { max-width: 100%; width: 100%; }
-    </style>`;
-    const cspTag = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${API_ORIGIN} https: http: data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'" />`;
+  const styleTag = `<style>body{margin:0;font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#1b1a13;background:#fff!important}img{max-width:100%;height:auto}table{max-width:100%;width:100%}</style>`;
+  const cspTag = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${API_ORIGIN} https: http: data:; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'" />`;
 
   if (/<html[\s>]/i.test(body)) {
     if (/<head[\s>]/i.test(body)) {
-      return body.replace(
-        /<head[^>]*>/i,
-        (match) => `${match}${cspTag}${baseTag}${styleTag}`
-      );
+      return body.replace(/<head[^>]*>/i, (m) => `${m}${cspTag}${baseTag}${styleTag}`);
     }
-    return body.replace(
-      /<html[^>]*>/i,
-      (match) => `${match}<head>${cspTag}${baseTag}${styleTag}</head>`
-    );
+    return body.replace(/<html[^>]*>/i, (m) => `${m}<head>${cspTag}${baseTag}${styleTag}</head>`);
   }
-
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    ${cspTag}
-    ${baseTag}
-    ${styleTag}
-  </head>
-  <body>${body}</body>
-</html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>${cspTag}${baseTag}${styleTag}</head><body>${body}</body></html>`;
 }
 
 function IconSpark() {
   return (
-    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M12 2l2.2 6.2L20 10l-5.8 1.8L12 18l-2.2-6.2L4 10l5.8-1.8L12 2z"
-        fill="currentColor"
-      />
+    <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />
+      <path d="M12 15v6" />
+      <path d="M8 18h8" />
     </svg>
   );
 }
 
 function IconExternal() {
   return (
-    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4 8.3-8.3H14V3z"
-        fill="currentColor"
-      />
-      <path
-        d="M5 5h6v2H7v10h10v-4h2v6H5V5z"
-        fill="currentColor"
-      />
+    <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
     </svg>
   );
 }
 
-function LandingPage({ loginUrl }) {
+function IconMail() {
+  return (
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <polyline points="22,7 12,13 2,7" />
+    </svg>
+  );
+}
+
+function LoadingScreen() {
   return (
     <div className="landing">
-      <header className="landing-topbar">
-        <div className="brand-mark">Mail AI Manager</div>
-        <div className="landing-actions">
-          <a className="btn ghost" href="#features">
-            Features
-          </a>
-          <a className="btn primary" href={loginUrl}>
-            Continue with Google
-          </a>
+      <div className="landing-hero">
+        <div className="landing-card">
+          <p className="eyebrow">Aegis Mail</p>
+          <h1>Loading secure session...</h1>
+          <p>Checking your authenticated inbox state.</p>
         </div>
-      </header>
+      </div>
+    </div>
+  );
+}
 
-      <section className="landing-hero compact">
-        <div className="landing-copy compact">
-          <p className="eyebrow">AI inbox workspace</p>
-          <h1>Read, understand, and act on email faster.</h1>
-          <p className="landing-text">
-            A modern Gmail-connected service that summarizes emails, highlights attachments, and turns inbox noise into clean action items.
-          </p>
+function LandingPage({ onSignIn, signInError }) {
+  return (
+    <div className="landing">
+      <nav className="landing-nav">
+        <div className="landing-brand">
+          <img src="/logo2.png" alt="Aegis Mail" className="landing-logo" />
+          Aegis Mail
+        </div>
+        <div className="landing-nav-actions">
+          <button className="btn primary" onClick={onSignIn}>Sign in with Google</button>
+        </div>
+      </nav>
+      <section className="landing-hero">
+        <div className="landing-card">
+          <p className="eyebrow"><IconSpark /> AI-powered inbox</p>
+          <h1>Read, understand, and <span className="highlight">act</span> on email faster.</h1>
+          <p>Summarizes your Gmail with AI — explains the context, jargon, and what you need to do, in plain language.</p>
+          {signInError && <p className="error" style={{marginTop: '1rem'}}>{signInError}</p>}
           <div className="landing-cta">
-            <a className="btn primary" href={loginUrl}>
-              Sign in with Google
-            </a>
-            <a className="btn ghost" href="#features">
-              See how it works
-            </a>
+            <button className="btn primary" onClick={onSignIn}>Continue with Google</button>
           </div>
         </div>
-      </section>
-
-      <section className="feature-grid" id="features">
-        <article className="feature-card">
-          <div className="feature-icon">01</div>
-          <h3>Google login first</h3>
-          <p>Users land on a marketing page and only enter the inbox after authenticating with Google.</p>
-        </article>
-        <article className="feature-card">
-          <div className="feature-icon">02</div>
-          <h3>Modern email reading</h3>
-          <p>Messages open with smooth transitions, clean spacing, and inline HTML rendering like a premium mail app.</p>
-        </article>
-        <article className="feature-card">
-          <div className="feature-icon">03</div>
-          <h3>AI with structure</h3>
-          <p>Summaries are split into what it is, main offer, benefits, and next steps so the result is easy to scan.</p>
-        </article>
       </section>
     </div>
   );
@@ -209,6 +251,10 @@ function LandingPage({ loginUrl }) {
 export default function App() {
   const [user, setUser] = useState("");
   const [sessionReady, setSessionReady] = useState(false);
+  const [signInError, setSignInError] = useState("");
+  const [idToken, setIdToken] = useState("");
+  const idTokenRef = useRef("");
+  const [needGmail, setNeedGmail] = useState(false);
   const [items, setItems] = useState([]);
   const [selected, setSelected] = useState(null);
   const [showInsight, setShowInsight] = useState(false);
@@ -216,10 +262,18 @@ export default function App() {
   const [showFullBody, setShowFullBody] = useState(false);
   const [attachmentPreviewId, setAttachmentPreviewId] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [searchInput, setSearchInput] = useState("");
   const [query, setQuery] = useState("");
   const [maxResults, setMaxResults] = useState(20);
+  const [fontScale, setFontScale] = useState(() => {
+    const saved = localStorage.getItem("aegis-font-scale");
+    return saved ? parseFloat(saved) : 1;
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   useEffect(() => {
     if (window.location.pathname === "/auth/callback") {
@@ -227,132 +281,155 @@ export default function App() {
     }
   }, []);
 
-  const loginUrl = useMemo(() => `${API_BASE}/auth/google`, []);
-  const visibleCount = items.length;
-
   useEffect(() => {
     let cancelled = false;
-
-    async function fetchSession() {
-      try {
-        const response = await fetch(`${API_BASE}/api/me`, {
-          credentials: "include",
-        });
-        if (!response.ok) {
-          if (!cancelled) setUser("");
-          return;
-        }
-        const data = await response.json();
-        if (!cancelled) {
-          setUser(String(data.user || ""));
-        }
-      } catch {
-        if (!cancelled) setUser("");
-      } finally {
+    async function initSession() {
+      const stored = getStoredSession();
+      if (!stored.uid) {
         if (!cancelled) setSessionReady(true);
+        return;
       }
+      const freshToken = await getIdToken();
+      if (freshToken) {
+        setIdToken(freshToken);
+        idTokenRef.current = freshToken;
+      }
+      try {
+        const headers = { "Content-Type": "application/json" };
+        if (freshToken) headers["Authorization"] = `Bearer ${freshToken}`;
+        const response = await fetch(`${API_BASE}/api/me`, { credentials: "include", headers });
+        if (!response.ok) { if (!cancelled) setUser(""); return; }
+        const data = await response.json();
+        if (!cancelled) setUser(String(data.user || ""));
+      } catch { if (!cancelled) setUser(""); }
+      finally { if (!cancelled) setSessionReady(true); }
     }
-
-    fetchSession();
-    return () => {
-      cancelled = true;
-    };
+    initSession();
+    return () => { cancelled = true; };
   }, []);
+
+  async function handleSignIn() {
+    try {
+      setSignInError("");
+      const { idToken: token } = await signInWithGoogle();
+      setIdToken(token);
+      idTokenRef.current = token;
+      const response = await fetch(`${API_BASE}/api/auth/firebase`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ id_token: token }),
+      });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `Auth error ${response.status}`);
+      }
+      const data = await response.json();
+      setUser(String(data.user || ""));
+      setSessionReady(true);
+    } catch (err) {
+      const msg = err._friendlyMessage || String(err);
+      setSignInError(msg);
+    }
+  }
+
+  function authFetch(path, options = {}) {
+    const headers = { ...options.headers };
+    const token = idTokenRef.current;
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return fetch(`${API_BASE}${path}`, { ...options, credentials: "include", headers });
+  }
 
   async function fetchMessages() {
     if (!user) return;
-    setLoading(true);
-    setError("");
+    setLoading(true); setError(""); setNeedGmail(false);
     try {
       const params = new URLSearchParams();
       params.set("max_results", String(maxResults));
       if (query.trim()) params.set("query", query.trim());
-
-      const response = await fetch(`${API_BASE}/api/messages?${params}`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
+      const response = await authFetch(`/api/messages?${params}`);
+      if (response.status === 401) {
+        const errData = await response.json().catch(() => ({}));
+        if (errData.detail === "No token for user.") { setNeedGmail(true); return; }
         throw new Error(`API error ${response.status}`);
       }
+      if (!response.ok) throw new Error(`API error ${response.status}`);
       const data = await response.json();
       const nextItems = data.items || [];
       setItems(nextItems);
-      const nextSelected = selected
-        ? nextItems.find((item) => item.id === selected.id)
-        : null;
-      setSelected(nextSelected || null);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
+      setSelected(prev => prev ? nextItems.find(i => i.id === prev.id) : null);
+    } catch (err) { setError(String(err)); }
+    finally { setLoading(false); }
   }
 
-  function logout() {
-    fetch(`${API_BASE}/auth/logout`, { credentials: "include" }).finally(() => {
-      setUser("");
-      setItems([]);
-      setSelected(null);
-      setLoading(false);
-      setError("");
-      setShowInsight(false);
-      setShowFullBody(false);
-      setAttachmentPreviewId("");
-      setSummaryLoading(false);
-      setSessionReady(true);
+  async function connectGmail() {
+    try {
+      const response = await authFetch("/api/auth/gmail-url");
+      if (!response.ok) throw new Error(`Failed to get Gmail auth URL: ${response.status}`);
+      const data = await response.json();
+      window.location.href = data.url;
+    } catch (err) { setError(String(err)); }
+  }
+
+  async function logout() {
+    await signOutFirebase().catch(() => {});
+    setIdToken(""); setNeedGmail(false);
+    authFetch("/auth/logout").finally(() => {
+      setUser(""); setItems([]); setSelected(null); setLoading(false); setError("");
+      setShowInsight(false); setShowFullBody(false); setAttachmentPreviewId("");
+      setSummaryLoading(false); setSessionReady(true);
+      setSearchInput(""); setQuery("");
     });
   }
 
-  useEffect(() => {
-    if (user) {
-      fetchMessages();
+  async function handleDeleteAccount() {
+    setDeletingAccount(true);
+    try {
+      const response = await authFetch("/api/auth/delete-account", { method: "POST" });
+      if (!response.ok) throw new Error(`Delete failed (${response.status})`);
+      await signOutFirebase().catch(() => {});
+      setIdToken(""); setUser(""); setItems([]); setSelected(null); setLoading(false);
+      setSessionReady(true); setShowSettings(false); setDeleteConfirm(false);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setDeletingAccount(false);
     }
-  }, [user, query, maxResults]);
+  }
 
   useEffect(() => {
-    setShowInsight(false);
-    setShowFullBody(false);
-    setAttachmentPreviewId("");
+    localStorage.setItem("aegis-font-scale", String(fontScale));
+  }, [fontScale]);
+
+  useEffect(() => { if (user) fetchMessages(); }, [user, query, maxResults]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(searchInput), 350);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    setShowInsight(false); setShowFullBody(false); setAttachmentPreviewId("");
   }, [selected?.id]);
 
   useEffect(() => {
     if (!selected || !user) return undefined;
     if (selected.provider === "gemini") return undefined;
     let cancelled = false;
-
     async function fetchSummary() {
       setSummaryLoading(true);
       try {
-        const response = await fetch(
-          `${API_BASE}/api/messages/${selected.id}/summary`,
-          { credentials: "include" }
-        );
-        if (!response.ok) {
-          throw new Error(`Summary error ${response.status}`);
-        }
+        const response = await authFetch(`/api/messages/${selected.id}/summary`);
+        if (!response.ok) throw new Error(`Summary error ${response.status}`);
         const data = await response.json();
         if (cancelled) return;
-        setSelected((prev) => (prev ? { ...prev, ...data } : prev));
-        setItems((prev) =>
-          prev.map((item) =>
-            item.id === selected.id ? { ...item, ...data } : item
-          )
-        );
-      } catch (err) {
-        if (!cancelled) {
-          setError(String(err));
-        }
-      } finally {
-        if (!cancelled) {
-          setSummaryLoading(false);
-        }
-      }
+        setSelected(prev => prev ? { ...prev, ...data } : prev);
+        setItems(prev => prev.map(item => item.id === selected.id ? { ...item, ...data } : item));
+      } catch (err) { if (!cancelled) setError(String(err)); }
+      finally { if (!cancelled) setSummaryLoading(false); }
     }
-
     fetchSummary();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [selected?.id, user]);
 
   useEffect(() => {
@@ -362,375 +439,237 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [showInsight, selected?.id]);
 
-  if (!sessionReady) {
+  if (!sessionReady) return <LoadingScreen />;
+  if (!user) return <LandingPage onSignIn={handleSignIn} signInError={signInError} />;
+
+  const userInitial = (user || "U")[0].toUpperCase();
+
+  function MsgCard({ item }) {
     return (
-      <div className="landing">
-        <section className="landing-hero compact">
-          <div className="landing-copy compact">
-            <p className="eyebrow">Mail AI Manager</p>
-            <h1>Loading secure session...</h1>
-            <p className="landing-text">Checking your authenticated inbox state.</p>
+      <button
+        className={`msg-card ${selected?.id === item.id ? "active" : ""} ${item.is_unread ? "unread" : ""}`}
+        onClick={() => setSelected(item)}
+      >
+        <div className="msg-card-top">
+          <span className="msg-sender">{item.from_name || item.from?.split("<")[0]?.trim() || item.from || "Unknown"}</span>
+          <span className="msg-date">{item.date}</span>
+        </div>
+        <div className="msg-card-subj-row">
+          {item.is_unread && <span className="msg-unread" />}
+          <p className="msg-subject">{item.subject || "(no subject)"}</p>
+        </div>
+        <p className="msg-preview">{clampText(item.summary || item.snippet, 160)}</p>
+        <div className="msg-card-footer">
+          <div className="msg-tags">
+            <span className="msg-tag">{item.topic || "General"}</span>
+            {(item.attachments || []).length > 0 && (
+              <span className="msg-tag">{(item.attachments || []).length} files</span>
+            )}
           </div>
-        </section>
-      </div>
+        </div>
+      </button>
     );
   }
 
-  if (!user) {
-    return <LandingPage loginUrl={loginUrl} />;
-  }
-
   return (
-    <div className="app">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Mail AI Manager</p>
-          <h1>Inbox intelligence, not inbox chaos.</h1>
-          <p className="lede">
-            Scan unread and read messages, get summaries, and spot action items
-            fast.
-          </p>
+    <div className="app" style={{ zoom: fontScale }}>
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <img src="/logo2.png" alt="Aegis" className="sidebar-logo-img" />
+          <span className="sidebar-title">Aegis</span>
+          <button className="sidebar-settings-btn" onClick={() => setShowSettings(true)} title="Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
         </div>
-        <div className="topbar-actions">
-          {user ? (
-            <>
-              <span className="chip">{user}</span>
-              <button className="btn ghost" onClick={logout}>
-                Sign out
-              </button>
-            </>
-          ) : (
-            <a className="btn primary" href={loginUrl}>
-              Sign in with Google
-            </a>
-          )}
+        <div className="sidebar-search">
+          <svg className="sidebar-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input placeholder="Search inbox…" value={searchInput} onChange={e => setSearchInput(e.target.value)} />
         </div>
-      </header>
-
-      <section className="controls">
-        <label className="control">
-          <span>Search</span>
-          <input
-            placeholder="from:groww subject:invoice"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            disabled={!user}
-          />
-        </label>
-        <label className="control">
-          <span>Max</span>
-          <input
-            type="number"
-            min="1"
-            max="100"
-            value={maxResults}
-            onChange={(e) => setMaxResults(Number(e.target.value || 1))}
-            disabled={!user}
-          />
-        </label>
-        <button className="btn" onClick={fetchMessages} disabled={!user || loading}>
-          {loading ? "Loading..." : "Refresh"}
-        </button>
-      </section>
-
-      {error && <div className="error">Error: {error}</div>}
-
-      <main className={`grid ${selected ? "has-detail" : "list-only"}`}>
-        <section className={`panel list ${selected ? "" : "centered"}`}>
-          <div className="panel-head">
-            <div>
-              <div className="panel-title">Messages</div>
-              <h3>Inbox</h3>
-            </div>
-            <span className="panel-pill">{loading ? "Refreshing" : `${visibleCount} loaded`}</span>
+        <div className="sidebar-list">
+          <div className="sidebar-list-header">
+            <span>Inbox</span>
+            <span>{loading ? "…" : items.length}</span>
           </div>
-          {!user && (
-            <div className="empty empty-card">
-              <h4>Sign in to open your inbox</h4>
-              <p>Use Google authentication to connect your mailbox and start analyzing mail immediately.</p>
-              <a className="btn primary" href={loginUrl}>Connect Gmail</a>
+          {needGmail && (
+            <div style={{padding: '16px 10px', textAlign: 'center'}}>
+              <p style={{fontSize: '13px', color: 'rgba(255,255,255,0.5)', margin: '0 0 10px'}}>Connect Gmail to read your inbox</p>
+              <button className="btn primary" onClick={connectGmail}>Connect Gmail</button>
             </div>
           )}
-          {user && loading && items.length === 0 && (
+          {loading && items.length === 0 && (
             <div className="skeleton-stack">
-              <div className="message-skeleton" />
-              <div className="message-skeleton" />
-              <div className="message-skeleton" />
-              <div className="message-skeleton" />
+              <div className="msg-skeleton" /><div className="msg-skeleton" />
+              <div className="msg-skeleton" /><div className="msg-skeleton" />
             </div>
           )}
-          {user && items.length === 0 && !loading && (
-            <div className="empty empty-card">No messages found.</div>
+          {items.length === 0 && !loading && (
+            <div style={{padding: '24px 10px', textAlign: 'center', color: 'rgba(255,255,255,0.25)', fontSize: '13px'}}>
+              No messages found.
+            </div>
           )}
-          {items.map((item) => (
-            <button
-              key={item.id}
-              className={`card ${selected?.id === item.id ? "active" : ""}`}
-              onClick={() => setSelected(item)}
-            >
-              <div className="card-head">
-                <span className={`badge ${item.is_unread ? "alert" : ""}`}>
-                  {item.is_unread ? "Unread" : "Read"}
-                </span>
-                <span className="meta">{item.date}</span>
-              </div>
-              <h3>{item.subject}</h3>
-              <p className="meta">From: {item.from}</p>
-              <p className="summary">
-                {clampText(item.what_it_is || item.summary || item.snippet, 140)}
-              </p>
-              <div className="card-tags">
-                <span className="tag">{item.topic || "General"}</span>
-                {(item.attachments || []).length > 0 && (
-                  <span className="tag">
-                    {(item.attachments || []).length} attachments
-                  </span>
-                )}
-              </div>
+          {loading && items.length > 0 && <div className="search-loader" />}
+          {items.map(item => <MsgCard key={item.id} item={item} />)}
+        </div>
+        <div className="sidebar-footer">
+          <div className="user-chip">
+            <div className="user-avatar">{userInitial}</div>
+            <span className="user-name">{user}</span>
+          </div>
+          <button className="btn ghost small" onClick={logout}>
+            Sign out
+          </button>
+        </div>
+      </aside>
+
+      {/* Main content */}
+      <div className="main-content">
+        <div className="main-topbar">
+          <div className="main-topbar-left">
+            {!selected && <h2>Inbox</h2>}
+          </div>
+          <div className="main-topbar-right">
+            <div className="limit-group">
+              <span className="limit-label">Limit</span>
+              <button className="limit-btn" onClick={() => setMaxResults(p => Math.max(1, p - 1))}>−</button>
+              <span className="limit-value">{maxResults}</span>
+              <button className="limit-btn" onClick={() => setMaxResults(p => Math.min(100, p + 1))}>+</button>
+            </div>
+            <div className="limit-group" style={{marginLeft: '4px'}}>
+              <span className="limit-label">A</span>
+              <button className="limit-btn" onClick={() => setFontScale(p => Math.max(0.8, +(p - 0.1).toFixed(1)))}>−</button>
+              <span className="limit-value">{Math.round(fontScale * 100)}%</span>
+              <button className="limit-btn" onClick={() => setFontScale(p => Math.min(1.4, +(p + 0.1).toFixed(1)))}>+</button>
+            </div>
+            <button className="btn" onClick={fetchMessages} disabled={!user || loading}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              {loading ? "Refreshing…" : "Refresh"}
             </button>
-          ))}
-        </section>
+          </div>
+        </div>
 
-        {selected && (
-          <section className="panel detail">
-            <div className="panel-title">Details</div>
-            <div className="detail-body">
-              <div className="detail-head">
-                <h2>{selected.subject}</h2>
-                <div className="meta">From: {selected.from}</div>
-                <div className="meta">To: {selected.to}</div>
-                <div className="meta">Date: {selected.date}</div>
-                <div className="detail-actions">
-                  <button
-                    className="btn ghost icon-btn"
-                    type="button"
-                    onClick={() => setShowInsight(true)}
-                  >
-                    <IconSpark /> AI insights
-                  </button>
-                  <button
-                    className="btn ghost"
-                    type="button"
-                    onClick={() => setSelected(null)}
-                  >
-                    Close
-                  </button>
-                  {selected.gmail_url && (
-                    <a
-                      className="btn ghost icon-btn"
-                      href={selected.gmail_url}
-                      target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                      <IconExternal /> Open in Gmail
-                    </a>
-                  )}
-                </div>
+        {error && <div style={{padding: '10px 24px'}}><p className="error">{error}</p></div>}
+
+        {selected ? (
+          <div className="detail-view">
+            <div className="detail-header">
+              <h2>{selected.subject}</h2>
+              <div className="detail-header-meta">
+                <span>From: {selected.from}</span>
+                <span>To: {selected.to}</span>
+                <span>{selected.date}</span>
               </div>
-
-              <div className="detail-section">
-                <h4>AI summary</h4>
+              <div className="detail-header-actions">
+                <button className="btn icon-btn" onClick={() => setShowInsight(true)} title="AI Insights"><IconSpark /></button>
+                {selected.gmail_url && (
+                  <a className="btn icon-btn" href={selected.gmail_url} target="_blank" rel="noopener noreferrer" title="Open in Gmail"><IconExternal /></a>
+                )}
+                <button className="btn" onClick={() => setSelected(null)}>Close</button>
+              </div>
+            </div>
+            <div className="detail-scroll">
+              {/* AI Summary Hero */}
+              <div className="summary-hero">
+                <div className="summary-hero-header">
+                  <IconSpark />
+                  <h3>AI Summary</h3>
+                  <span className={`pill pill-${selected.category || "informational"}`}>
+                    {selected.category || "informational"}
+                  </span>
+                  <span className="pill">{selected.topic || "General"}</span>
+                </div>
                 {summaryLoading ? (
-                  <div className="insight-block">
-                    <div className="live-indicator">
-                      <span className="live-dot" /> Generating summary
-                    </div>
-                    <div className="insight-skeleton">
-                      <div className="skeleton-line w-60" />
-                      <div className="skeleton-line w-90" />
-                      <div className="skeleton-line w-75" />
-                      <div className="skeleton-line w-80" />
+                  <div>
+                    <div className="live-indicator"><span className="live-dot" /> Generating summary</div>
+                    <div className="insight-skeleton" style={{marginTop: '10px'}}>
+                      <div className="skeleton-line w-90" /><div className="skeleton-line w-75" />
+                      <div className="skeleton-line w-80" /><div className="skeleton-line w-60" />
                     </div>
                   </div>
                 ) : (
-                  <div className="insight-block">
-                    <p className="insight-label">What it is</p>
-                    <p className="text-block">
-                      {renderTextWithLinks(
-                        selected.what_it_is ||
-                          selected.summary ||
-                          selected.snippet ||
-                          "No summary available."
-                      )}
-                    </p>
-                    <p className="insight-label">Main offer</p>
-                    <p className="text-block">
-                      {renderTextWithLinks(
-                        selected.main_offer || "Not specified."
-                      )}
-                    </p>
-                    <p className="insight-label">Key benefits</p>
-                    {renderBullets(
-                      (selected.key_benefits || []).length > 0
-                        ? selected.key_benefits
-                        : selected.what_it_contains,
-                      "No benefits extracted."
-                    )}
-                    <p className="insight-label">How to open</p>
-                    <p className="text-block">
-                      {renderTextWithLinks(
-                        selected.how_to_open || "Not applicable."
-                      )}
-                    </p>
-                    <p className="insight-label">Important notes</p>
-                    {renderBullets(
-                      selected.important_notes,
-                      "No extra notes detected."
-                    )}
-                    <p className="insight-label">What you should do</p>
-                    {renderBullets(
-                      selected.what_you_should_do,
-                      "No action suggested."
+                  <div className="summary-content">
+                    {renderSummary(selected.summary || selected.snippet || "No summary available.")}
+                    {(selected.action_items || []).length > 0 && (
+                      <>
+                        <p className="insight-label">What to do</p>
+                        {renderBullets(selected.action_items)}
+                      </>
                     )}
                   </div>
                 )}
-                <div className="summary-meta">
-                  <span className="pill">Topic: {selected.topic || "General"}</span>
-                  <span className="pill">Concern: {selected.concern}</span>
-                  <span className="pill">
-                    {summaryLoading
-                      ? "AI: generating..."
-                      : `AI: ${selected.provider || "unknown"}`}
-                  </span>
+              </div>
+
+              {/* Sender */}
+              <div className="detail-section">
+                <h4>Sender</h4>
+                <div className="sender-grid">
+                  <div><p className="sender-label">Name</p><p>{selected.from_name || "Unknown"}</p></div>
+                  <div><p className="sender-label">Email</p><p>{selected.from_email || "Unknown"}</p></div>
+                  <div><p className="sender-label">To</p><p>{(selected.to_emails || []).join(", ") || selected.to}</p></div>
                 </div>
-                <p className="meta">Why received: {selected.why_received}</p>
               </div>
 
-              <div className="detail-section">
-                <h4>Sender details</h4>
-                <p>From name: {selected.from_name || "Unknown"}</p>
-                <p>From email: {selected.from_email || "Unknown"}</p>
-                <p>
-                  To: {(selected.to_emails || []).join(", ") || selected.to}
-                </p>
-              </div>
-
-              <div className="detail-section">
-                <h4>Why you received this</h4>
-                <p>{selected.why_received}</p>
-              </div>
-
-              <div className="detail-section">
-                <h4>Action items</h4>
-                <ul>
-                  {(selected.action_items || []).map((item, idx) => (
-                    <li key={`${selected.id}-${idx}`}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-
+              {/* Unsubscribe */}
               <div className="detail-section">
                 <h4>Unsubscribe</h4>
-                <p>{selected.unsubscribe_instructions}</p>
-                {(selected.list_unsubscribe || []).length > 0 ? (
-                  <ul>
-                    {selected.list_unsubscribe.map((item) => {
-                      const isLink =
-                        item.startsWith("http") || item.startsWith("mailto:");
-                      return (
-                        <li key={item}>
-                          {isLink ? (
-                            <a href={item} target="_blank" rel="noopener noreferrer">
-                              {item}
-                            </a>
-                          ) : (
-                            item
-                          )}
-                        </li>
-                      );
+                <p>{selected.unsubscribe_instructions || "Not available"}</p>
+                {(selected.list_unsubscribe || []).length > 0 && (
+                  <div style={{marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '3px'}}>
+                    {selected.list_unsubscribe.map(item => {
+                      const isLink = item.startsWith("http") || item.startsWith("mailto:");
+                      return isLink
+                        ? <a key={item} className="link" href={item} target="_blank" rel="noopener noreferrer">{item}</a>
+                        : <span key={item} className="meta">{item}</span>;
                     })}
-                  </ul>
-                ) : (
-                  <p>No unsubscribe information found.</p>
+                  </div>
                 )}
               </div>
 
+              {/* Attachments */}
               {(selected.attachments || []).length > 0 && (
                 <div className="detail-section">
-                  <div className="detail-section-header">
-                    <h4>Attachments</h4>
-                    <span className="meta">
-                      {(selected.attachments || []).length} files
-                    </span>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
+                    <h4 style={{margin: 0}}>Attachments</h4>
+                    <span className="meta">{(selected.attachments || []).length} files</span>
                   </div>
-                  <div className="attachments-list">
-                    {(selected.attachments || []).map((attachment, idx) => {
-                      const attachmentKey =
-                        attachment.attachment_id || attachment.part_id || `${idx}`;
-                      const downloadUrl = buildAttachmentUrl(
-                        selected.id,
-                        attachment,
-                        user
-                      );
-                      const mimeType = String(attachment.mime_type || "");
-                      const isPdf =
-                        mimeType.toLowerCase() === "application/pdf";
-                      const isInline = Boolean(attachment.is_inline);
+                  <div style={{display: 'flex', flexDirection: 'column', gap: '6px'}}>
+                    {(selected.attachments || []).map((att, idx) => {
+                      const key = att.attachment_id || att.part_id || `${idx}`;
+                      const url = buildAttachmentUrl(selected.id, att);
+                      const isPdf = String(att.mime_type || "").toLowerCase() === "application/pdf";
                       return (
-                        <div
-                          key={`${selected.id}-att-${attachmentKey}`}
-                          className="attachment-block"
-                        >
+                        <div key={`${selected.id}-att-${key}`}>
                           <div className="attachment-item">
-                            <div className="attachment-meta">
-                              <div className="attachment-name">
-                                {attachment.filename || "Attachment"}
-                              </div>
-                              <div className="meta">
-                                {mimeType || "application/octet-stream"} -
-                                {" "}
-                                {formatBytes(attachment.size)}
-                                {isInline ? " - inline" : ""}
-                              </div>
+                            <div className="attachment-icon">
+                              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14 2 14 8 20 8" />
+                              </svg>
+                            </div>
+                            <div className="attachment-info">
+                              <div className="attachment-name">{att.filename || "Attachment"}</div>
+                              <div className="attachment-meta">{att.mime_type || "application/octet-stream"} — {formatBytes(att.size)}</div>
                             </div>
                             <div className="attachment-actions">
-                              {isPdf && downloadUrl && (
-                                <button
-                                  className="link"
-                                  type="button"
-                                  onClick={() =>
-                                    setAttachmentPreviewId((prev) =>
-                                      prev === attachmentKey ? "" : attachmentKey
-                                    )
-                                  }
-                                >
-                                  {attachmentPreviewId === attachmentKey
-                                    ? "Hide preview"
-                                    : "Preview"}
+                              {isPdf && url && (
+                                <button className="link" onClick={() => setAttachmentPreviewId(prev => prev === key ? "" : key)}>
+                                  {attachmentPreviewId === key ? "Hide" : "Preview"}
                                 </button>
                               )}
-                              {downloadUrl && (
-                                <>
-                                  <a
-                                    className="link"
-                                    href={downloadUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                  >
-                                    Open
-                                  </a>
-                                  <a
-                                    className="link"
-                                    href={downloadUrl}
-                                    download
-                                  >
-                                    Download
-                                  </a>
-                                </>
-                              )}
+                              {url && <><a className="link" href={url} target="_blank" rel="noopener noreferrer">Open</a><a className="link" href={url} download>Download</a></>}
                             </div>
                           </div>
-                          {isPdf &&
-                            downloadUrl &&
-                            attachmentPreviewId === attachmentKey && (
-                              <iframe
-                                className="attachment-preview"
-                                title={`Preview ${
-                                  attachment.filename || "attachment"
-                                }`}
-                                src={downloadUrl}
-                              />
-                            )}
+                          {isPdf && url && attachmentPreviewId === key && (
+                            <iframe className="attachment-preview" title={`Preview ${att.filename || "attachment"}`} src={url} />
+                          )}
                         </div>
                       );
                     })}
@@ -738,149 +677,144 @@ export default function App() {
                 </div>
               )}
 
+              {/* Message body */}
               <div className="detail-section">
-                <h4>Snippet</h4>
-                <p>{selected.snippet}</p>
-              </div>
-
-              <div className="detail-section">
-                <div className="detail-section-header">
-                  <h4>Message</h4>
-                </div>
+                <h4>Message</h4>
                 {selected.body_html ? (
-                  <iframe
-                    className="mail-html-frame"
-                    title="Email HTML preview"
-                    sandbox="allow-popups"
-                    referrerPolicy="no-referrer"
-                    srcDoc={buildHtmlDocument(
-                      replaceCidImages(
-                        selected.body_html,
-                        selected.attachments || [],
-                        selected.id
-                      )
-                    )}
-                  />
+                  <iframe className="mail-html-frame" title="Email HTML preview" sandbox="allow-popups" referrerPolicy="no-referrer"
+                    srcDoc={buildHtmlDocument(replaceCidImages(selected.body_html, selected.attachments || [], selected.id))} />
                 ) : (
                   <>
                     <div className={`mail-body ${showFullBody ? "expanded" : ""}`}>
-                      {renderTextWithLinks(
-                        selected.body || "No body available."
-                      )}
+                      {renderTextWithLinks(selected.body || "No body available.")}
                     </div>
-                    <button
-                      className="link"
-                      type="button"
-                      onClick={() => setShowFullBody((prev) => !prev)}
-                    >
-                      {showFullBody ? "Show less" : "Show more"}
-                    </button>
+                    {selected.body && selected.body.length > 200 && (
+                      <button className="link" style={{marginTop: '6px'}} onClick={() => setShowFullBody(p => !p)}>
+                        {showFullBody ? "Show less" : "Show more"}
+                      </button>
+                    )}
                   </>
                 )}
               </div>
             </div>
-          </section>
+          </div>
+        ) : (
+          <div className="detail-view empty">
+            <div className="empty-detail">
+              <IconMail />
+              <h3>Select a message</h3>
+              <p>Choose an email from your inbox to view its AI summary, details, and more.</p>
+            </div>
+          </div>
         )}
-      </main>
+      </div>
 
+      {/* Modal */}
       {showInsight && selected && (
         <div className="modal-backdrop" onClick={() => setShowInsight(false)}>
-          <div className="modal" onClick={(event) => event.stopPropagation()}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <div>
-                <p className="eyebrow">
-                  {insightLoading ? (
-                    <span className="live-indicator">
-                      <span className="live-dot" /> Summarizing
-                    </span>
-                  ) : (
-                    "AI Insights"
-                  )}
-                </p>
+                <p className="modal-label">{insightLoading ? <span className="live-indicator"><span className="live-dot" /> Summarizing</span> : "AI Insights"}</p>
                 <h3>{selected.subject}</h3>
               </div>
-              <button
-                className="btn ghost"
-                type="button"
-                onClick={() => setShowInsight(false)}
-              >
-                Close
-              </button>
+              <button className="btn ghost" onClick={() => setShowInsight(false)}>Close</button>
             </div>
             {insightLoading ? (
               <div className="insight-skeleton">
-                <div className="skeleton-line w-60" />
-                <div className="skeleton-line w-90" />
-                <div className="skeleton-line w-75" />
-                <div className="skeleton-line w-80" />
+                <div className="skeleton-line w-60" /><div className="skeleton-line w-90" />
+                <div className="skeleton-line w-75" /><div className="skeleton-line w-80" />
               </div>
             ) : (
               <div className="modal-grid">
                 <div>
-                  <p className="modal-label">What it is</p>
-                  <p>
-                    {selected.what_it_is ||
-                      selected.summary ||
-                      selected.snippet ||
-                      "No summary available."}
-                  </p>
-                  <p className="modal-label">Main offer</p>
-                  <p>{selected.main_offer || "Not specified."}</p>
-                  <p className="modal-label">Key benefits</p>
-                  {renderBullets(
-                    (selected.key_benefits || []).length > 0
-                      ? selected.key_benefits
-                      : selected.what_it_contains,
-                    "No benefits extracted."
+                  <p className="modal-label">Summary</p>
+                  <div className="summary-rich">{renderSummary(selected.summary || selected.snippet || "No summary available.")}</div>
+                  {(selected.action_items || []).length > 0 && (
+                    <><p className="modal-label" style={{marginTop: '12px'}}>What to do</p>{renderBullets(selected.action_items)}</>
                   )}
                 </div>
                 <div>
-                  <p className="modal-label">How to open</p>
-                  <p>{selected.how_to_open || "Not applicable."}</p>
-                  <p className="modal-label">What you should do</p>
-                  {renderBullets(
-                    selected.what_you_should_do,
-                    "No action suggested."
-                  )}
-                </div>
-                <div>
-                  <p className="modal-label">Important notes</p>
-                  {renderBullets(
-                    selected.important_notes,
-                    "No extra notes detected."
-                  )}
-                </div>
-                <div>
-                  <p className="modal-label">Why you received this</p>
-                  <p>{selected.why_received}</p>
-                  <p className="modal-label">Unsubscribe</p>
-                  <p>{selected.unsubscribe_instructions}</p>
-                  {(selected.list_unsubscribe || []).length > 0 ? (
-                    <ul>
-                      {selected.list_unsubscribe.map((item) => {
-                        const isLink =
-                          item.startsWith("http") || item.startsWith("mailto:");
-                        return (
-                          <li key={`modal-${item}`}>
-                            {isLink ? (
-                              <a href={item} target="_blank" rel="noopener noreferrer">
-                                {item}
-                              </a>
-                            ) : (
-                              item
-                            )}
-                          </li>
-                        );
+                  <p className="modal-label">Topic</p>
+                  <p>{selected.topic || "General"}</p>
+                  <p className="modal-label" style={{marginTop: '10px'}}>Category</p>
+                  <span className={`pill pill-${selected.category || "informational"}`}>{selected.category || "informational"}</span>
+                  <p className="modal-label" style={{marginTop: '10px'}}>Unsubscribe</p>
+                  <p>{selected.unsubscribe_instructions || "Not available"}</p>
+                  {(selected.list_unsubscribe || []).length > 0 && (
+                    <div style={{marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '3px'}}>
+                      {selected.list_unsubscribe.map(item => {
+                        const isLink = item.startsWith("http") || item.startsWith("mailto:");
+                        return isLink
+                          ? <a key={item} className="link" href={item} target="_blank" rel="noopener noreferrer">{item}</a>
+                          : <span key={item} className="meta">{item}</span>;
                       })}
-                    </ul>
-                  ) : (
-                    <p>No unsubscribe information found.</p>
+                    </div>
                   )}
                 </div>
               </div>
             )}
             <div className="modal-footer">
               <span className="meta">Model: {selected.provider}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings */}
+      {showSettings && (
+        <div className="modal-backdrop" onClick={() => { setShowSettings(false); setDeleteConfirm(false); }}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth: '440px'}}>
+            <div className="modal-header">
+              <h3>Settings</h3>
+              <button className="btn ghost" onClick={() => { setShowSettings(false); setDeleteConfirm(false); }}>Close</button>
+            </div>
+            <div className="modal-grid">
+              {!deleteConfirm ? (
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                      <circle cx="9" cy="7" r="4" />
+                      <line x1="17" y1="8" x2="23" y2="8" />
+                      <line x1="20" y1="5" x2="20" y2="11" />
+                    </svg>
+                    <div>
+                      <p className="settings-section-title">Account</p>
+                      <p className="settings-section-desc">Manage your account and connected services</p>
+                    </div>
+                  </div>
+                  <div className="settings-action">
+                    <div>
+                      <p className="settings-action-title">Delete account</p>
+                      <p className="settings-action-desc">Permanently remove your data from our storage and revoke Gmail access.</p>
+                    </div>
+                    <button className="btn danger" onClick={() => setDeleteConfirm(true)}>Delete</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="settings-section">
+                  <div className="settings-confirm">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="8" x2="12" y2="12" />
+                      <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    <h4>Delete your account?</h4>
+                    <p>This will permanently remove your data, revoke Gmail access, and sign you out. This action cannot be undone.</p>
+                    <div className="settings-confirm-actions">
+                      <button className="btn" onClick={() => setDeleteConfirm(false)} disabled={deletingAccount}>Cancel</button>
+                      <button className="btn danger" onClick={handleDeleteAccount} disabled={deletingAccount}>
+                        {deletingAccount ? (
+                          <><span className="live-dot" /> Deleting…</>
+                        ) : (
+                          "Yes, delete my account"
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

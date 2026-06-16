@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 
@@ -40,17 +40,20 @@ class EmailMessage:
 class SummaryResult:
     summary: str
     action_items: List[str]
-    concern: str
-    classification: str
-    legitimacy_reason: str
-    why_received: str
-    unsubscribe_instructions: str
     topic: str
     provider: str
-    what_it_is: str
-    main_offer: str
-    key_benefits: List[str]
-    what_it_contains: List[str]
-    how_to_open: str
-    important_notes: List[str]
-    what_you_should_do: List[str]
+    category: str = "informational"
+    concern: str = ""
+    classification: str = "unknown"
+    legitimacy_reason: str = ""
+    why_received: str = ""
+    unsubscribe_instructions: str = ""
+    what_it_is: str = ""
+    main_offer: str = ""
+    key_benefits: List[str] = field(default_factory=list)
+    what_it_contains: List[str] = field(default_factory=list)
+    how_to_open: str = ""
+    important_notes: List[str] = field(default_factory=list)
+    what_you_should_do: List[str] = field(default_factory=list)
+    sender_intent: str = ""
+    terms_explained: List[str] = field(default_factory=list)

@@ -18,19 +18,30 @@ Thumbs.db
 node_modules/
 dist/
 build/
+web/node_modules/
+web/dist/
 
 # Vite
 .vite/
 
 # Tokens and credentials
 /tokens/
+tokens/
 credentials.json
-*.json
+token.json
 *.pem
+client_secret_*.json
+*-firebase-adminsdk-*.json
 
-# Environment
+# Environment (track only .env.example)
 .env
-.env.*
+.env.local
+.env.production
+.env.development
+.env.test
+web/.env
+web/.env.local
+web/.env.production
 
 # Logs
 logs/
@@ -39,15 +50,6 @@ logs/
 # Editor swap
 *.swp
 
-__pycache__/
-*.pyc
-.venv/
-.env
-token.json
-credentials.json
+# Output
+/outputs/
 outputs/
-tokens/
-web/node_modules/
-web/dist/
-web/.env
-client_secret_*.json

@@ -186,39 +186,49 @@ class GroqSummarizer:
 
 def _build_prompt(email: EmailMessage) -> str:
     body = _clean_ai_text(email.body or email.snippet)
+
+    attachments_info = ", ".join(
+        [f"{a.filename} ({a.mime_type})" for a in email.attachments]
+    )
+
     return (
-        "You are an assistant that summarizes emails for a user. "
-        "Return ONLY JSON (no Markdown, no code fences) with keys: summary, action_items, concern, classification, "
-        "legitimacy_reason, why_received, unsubscribe_instructions, topic, "
-        "what_it_is, main_offer, key_benefits, what_it_contains, how_to_open, "
-        "important_notes, what_you_should_do. "
-        "summary: 1-3 sentences, no URLs, do not copy the email body. "
-        "action_items: list of 0-5 short strings. "
-        "concern: short phrase about urgency or risk. "
-        "classification: one of legit, spam, scam, unknown. "
-        "legitimacy_reason: short reason for the classification. "
-        "why_received: short reason why the user got this email. "
-        "unsubscribe_instructions: short steps or 'Not available'. "
-        "topic: 2-5 words describing the mail topic (e.g., security alert, billing). "
-        "what_it_is: 1 sentence plain English. "
-        "main_offer: 1 sentence describing the main offer or core purpose. "
-        "key_benefits: list of 2-5 short bullets. "
-        "what_it_contains: list of 1-4 short bullets. "
-        "how_to_open: 1-3 short steps or 'Not applicable'. "
-        "important_notes: list of 0-3 short bullets. "
-        "what_you_should_do: list of 1-3 short bullets.\n"
-        "Return valid JSON only. Example: {\"summary\":\"...\",\"action_items\":[\"...\"],\"concern\":\"...\",\"classification\":\"legit\",\"legitimacy_reason\":\"...\",\"why_received\":\"...\",\"unsubscribe_instructions\":\"...\",\"topic\":\"...\",\"what_it_is\":\"...\",\"main_offer\":\"...\",\"key_benefits\":[\"...\"],\"what_it_contains\":[\"...\"],\"how_to_open\":\"...\",\"important_notes\":[\"...\"],\"what_you_should_do\":[\"...\"]}\n\n"
-        f"From: {email.sender}\n"
-        f"From Email: {email.sender_email}\n"
-        f"To: {email.to}\n"
-        f"To Emails: {', '.join(email.to_emails)}\n"
-        f"Date: {email.date}\n"
+        "You are a helpful assistant. Summarize the email below in very simple language "
+        "for someone who may not be familiar with technical or financial terms.\n\n"
+        "Rules:\n"
+        "- Use easy, everyday English.\n"
+        "- Keep it short and clear.\n"
+        "- Explain the purpose of the email.\n"
+        "- Mention only the most important points.\n"
+        "- If any technical or hard terms appear, explain them simply in parentheses.\n"
+        "- Tell whether the email is: important, informational, warning, or action-required.\n"
+        "- End with a one-line overall conclusion starting with 'Overall:'.\n"
+        "- Do NOT repeat the user's email address or personal details. Refer to the user as 'you'.\n\n"
+        "Return ONLY valid JSON (no Markdown, no code fences) with these keys:\n"
+        "summary, category, action_items, topic\n\n"
+        "summary: The full summary text with bullet points (use dashes for bullets). "
+        "Start with 'Simple Summary of the Email' then a blank line, then 1-2 intro sentences, "
+        "then 'Main points:' then bullet points, then 'Overall:' conclusion.\n"
+        "category: One of: important, informational, warning, action-required.\n"
+        "action_items: list of short strings of what the user should do (0-3 items).\n"
+        "topic: 2-5 words describing the email topic.\n\n"
+        "Example output format:\n"
+        "{\"summary\":\"Simple Summary of the Email\\n\\n"
+        "This is an official update about your trading account.\\n\\n"
+        "Main points:\\n"
+        "- NSE has shared details about your account balance.\\n"
+        "- A password-protected attachment has the full details.\\n"
+        "- Use your PAN number (Permanent Account Number, a tax ID) as the password.\\n\\n"
+        "Overall: This is an informational and security-awareness email.\","
+        "\"category\":\"informational\",\"action_items\":[\"Open the attachment using your PAN as password\"],\"topic\":\"Account balance update\"}\n\n"
+        "SECURITY: Never include the user's email, name, or personal info in any field.\n\n"
         f"Subject: {email.subject}\n"
+        f"From: {email.sender} <{email.sender_email}>\n"
+        f"Date: {email.date}\n"
         f"Snippet: {email.snippet}\n"
         f"List-Unsubscribe: {', '.join(email.list_unsubscribe)}\n"
-        f"Attachments: {', '.join([a.filename for a in email.attachments])}\n"
+        f"Attachments: {attachments_info}\n"
         f"Authentication-Results: {email.auth_results}\n\n"
-        f"Body (trimmed):\n{body}\n"
+        f"Body:\n{body}\n"
     )
 
 
@@ -236,86 +246,29 @@ def _parse_summary(text: str, provider: str) -> SummaryResult:
 
     fallback_text = "" if text.strip().startswith("{") else text.strip()
     summary = extracted.get("summary") or fallback_text or "No summary available."
-    summary = _sanitize_summary(summary)
+
+    category = extracted.get("category") or "informational"
+    allowed_categories = {"important", "informational", "warning", "action-required"}
+    if category not in allowed_categories:
+        category = "informational"
+
     action_items = [
         _clean_ai_text(item) for item in _ensure_list(extracted.get("action_items"))
     ]
     action_items = [item for item in action_items if item]
-    concern = extracted.get("concern") or "No concern detected."
-    classification = _normalize_classification(extracted.get("classification"))
-    legitimacy_reason = extracted.get("legitimacy_reason") or "No assessment."
-    why_received = extracted.get("why_received") or "Not specified."
-    unsubscribe_instructions = (
-        extracted.get("unsubscribe_instructions") or "Not available."
-    )
-    topic = extracted.get("topic") or "General"
-    what_it_is = _clean_ai_text(extracted.get("what_it_is") or "")
-    main_offer = _clean_ai_text(extracted.get("main_offer") or "")
-    key_benefits = [
-        _clean_ai_text(item) for item in _ensure_list(extracted.get("key_benefits"))
-    ]
-    what_it_contains = [
-        _clean_ai_text(item)
-        for item in _ensure_list(extracted.get("what_it_contains"))
-    ]
-    how_to_open = _clean_ai_text(extracted.get("how_to_open") or "")
-    important_notes = [
-        _clean_ai_text(item)
-        for item in _ensure_list(extracted.get("important_notes"))
-    ]
-    what_you_should_do = [
-        _clean_ai_text(item)
-        for item in _ensure_list(extracted.get("what_you_should_do"))
-    ]
-
-    what_it_is = what_it_is or summary or "Email update."
-    key_benefits = [item for item in key_benefits if item]
-    what_it_contains = [item for item in what_it_contains if item]
-    if not main_offer and what_it_contains:
-        main_offer = what_it_contains[0]
-    main_offer = main_offer or "Not specified."
-    if not key_benefits and len(what_it_contains) > 1:
-        key_benefits = what_it_contains[1:]
-    important_notes = [item for item in important_notes if item]
-    what_you_should_do = [item for item in what_you_should_do if item]
-    how_to_open = how_to_open or "Not applicable."
-
     if isinstance(action_items, str):
         action_items = [action_items]
     if not isinstance(action_items, list):
         action_items = []
 
+    topic = extracted.get("topic") or "General"
+
     return SummaryResult(
         summary=summary.strip(),
         action_items=[str(item).strip() for item in action_items if str(item).strip()],
-        concern=concern.strip(),
-        classification=classification,
-        legitimacy_reason=str(legitimacy_reason).strip(),
-        why_received=str(why_received).strip(),
-        unsubscribe_instructions=str(unsubscribe_instructions).strip(),
         topic=str(topic).strip(),
         provider=provider,
-        what_it_is=str(what_it_is).strip(),
-        main_offer=str(main_offer).strip(),
-        key_benefits=[
-            str(item).strip() for item in key_benefits if str(item).strip()
-        ],
-        what_it_contains=[
-            str(item).strip()
-            for item in what_it_contains
-            if str(item).strip()
-        ],
-        how_to_open=str(how_to_open).strip(),
-        important_notes=[
-            str(item).strip()
-            for item in important_notes
-            if str(item).strip()
-        ],
-        what_you_should_do=[
-            str(item).strip()
-            for item in what_you_should_do
-            if str(item).strip()
-        ],
+        category=category,
     )
 
 
@@ -514,37 +467,28 @@ class LocalHeuristicSummarizer:
         sentences = _split_sentences(content)
         summary = _sanitize_summary(_summarize_sentences(sentences))
         action_items = _extract_actions(sentences)
-        concern = _detect_concern(content)
-        classification = _classify_message(content, email.list_unsubscribe)
-        legitimacy_reason = _legitimacy_reason(classification, content)
-        why_received = _why_received_reason(content, email.list_unsubscribe)
-        unsubscribe_instructions = _unsubscribe_hint(email.list_unsubscribe)
         topic = _detect_topic(content)
-        what_it_is = _what_it_is_hint(email, topic)
-        what_it_contains = _what_it_contains_hint(content)
-        how_to_open = _how_to_open_hint(content, email)
-        important_notes = _important_notes_hint(content)
-        what_you_should_do = _what_you_should_do_hint(action_items, email)
-        main_offer = _main_offer_hint(content)
-        key_benefits = _key_benefits_hint(content)
         return SummaryResult(
             summary=summary,
             action_items=action_items,
-            concern=concern,
-            classification=classification,
-            legitimacy_reason=legitimacy_reason,
-            why_received=why_received,
-            unsubscribe_instructions=unsubscribe_instructions,
             topic=topic,
             provider="local_heuristic",
-            what_it_is=what_it_is,
-            main_offer=main_offer,
-            key_benefits=key_benefits,
-            what_it_contains=what_it_contains,
-            how_to_open=how_to_open,
-            important_notes=important_notes,
-            what_you_should_do=what_you_should_do,
+            category=_classify_category(content),
         )
+
+
+def _classify_category(content: str) -> str:
+    lower = (content or "").lower()
+    urgency_words = ["urgent", "immediately", "asap", "deadline", "action required", "expir"]
+    warning_words = ["warning", "alert", "suspicious", "unauthorized", "security", "fraud"]
+    action_words = ["confirm", "verify", "update", "respond", "pay", "submit"]
+    if any(w in lower for w in urgency_words):
+        return "action-required"
+    if any(w in lower for w in warning_words):
+        return "warning"
+    if any(w in lower for w in action_words):
+        return "action-required"
+    return "informational"
 
 
 def _split_sentences(text: str) -> List[str]:
@@ -834,3 +778,22 @@ def _key_benefits_hint(content: str) -> List[str]:
     if "cost" in lower and "performance" in lower:
         benefits.append("Performance and cost optimization guidance.")
     return benefits
+
+
+def _sender_intent_hint(content: str, email: EmailMessage) -> str:
+    lower = (content or "").lower()
+    if any(w in lower for w in ["urgent", "immediately", "asap", "deadline", "expir"]):
+        return "The sender uses urgent language to prompt quick action."
+    if any(w in lower for w in ["limited time", "offer expires", "act now", "don't miss"]):
+        return "The sender creates a sense of urgency or scarcity to encourage a purchase."
+    if any(w in lower for w in ["thank you", "welcome", "congratulations", "great news"]):
+        return "The sender takes a friendly, appreciative tone to build goodwill."
+    if any(w in lower for w in ["confirm", "verify", "security", "unauthorized", "suspicious"]):
+        return "The sender uses a formal, security-focused tone to stress the importance of verification."
+    if any(w in lower for w in ["invoice", "bill", "payment", "receipt", "charge"]):
+        return "The sender notifies you about a financial transaction or expects payment."
+    if any(w in lower for w in ["newsletter", "update", "announcement", "monthly"]):
+        return "The sender shares informational or promotional updates to keep you engaged."
+    if any(w in lower for w in ["meeting", "schedule", "calendar", "invite", "appointment"]):
+        return "The sender wants to coordinate a meeting or confirm a scheduled event."
+    return "The sender provides information or a notification relevant to you."

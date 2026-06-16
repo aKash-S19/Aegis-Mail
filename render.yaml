@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: aegis-mail-api
+    runtime: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.mail_ai.web_ai:app --host 0.0.0.0 --port $PORT --forwarded-allow-ips '*'
+    envVars:
+      - key: WEB_FRONTEND_URL
+        value: https://aegis-mail.vercel.app
+      - key: WEB_REDIRECT_URI
+        value: https://aegis-mail-api.onrender.com/auth/google/callback
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: ALLOWED_HOSTS
+        value: aegis-mail-api.onrender.com,localhost
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: GMAIL_CREDENTIALS_PATH
+        value: client_secret.json
+      - key: TOKEN_DIR
+        value: /var/data/tokens
+      - key: OUTPUT_DIR
+        value: /var/data/outputs
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false

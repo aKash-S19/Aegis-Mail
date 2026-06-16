@@ -12,13 +12,15 @@ from bleach.css_sanitizer import CSSSanitizer
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
+from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import json
 
 from google.oauth2.credentials import Credentials as OAuth2Credentials
 
-from .supabase_store import SupabaseStore, SupabaseConfig
+from .firebase_store import FirebaseStore, FirebaseConfig
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -49,18 +51,48 @@ REDIRECT_URI = os.getenv(
 TOKEN_DIR = Path(os.getenv("TOKEN_DIR", "tokens"))
 TOKEN_DIR.mkdir(parents=True, exist_ok=True)
 
-# Initialize Supabase store when configured
-SUPABASE_STORE: SupabaseStore | None = None
-if settings.supabase_url and settings.supabase_service_role_key:
-    SUPABASE_STORE = SupabaseStore(
-        SupabaseConfig(
-            url=settings.supabase_url,
-            service_role_key=settings.supabase_service_role_key,
-            token_encryption_key=settings.token_encryption_key,
-        )
-    )
+# Initialize Firebase Admin SDK + store when configured
+FIREBASE_STORE: FirebaseStore | None = None
+_firebase_auth = None
+_is_placeholder = lambda v: v and v.strip().startswith("your-")
+firebase_available = (
+    settings.firebase_project_id
+    and settings.firebase_private_key
+    and settings.firebase_client_email
+    and not _is_placeholder(settings.firebase_project_id)
+    and not _is_placeholder(settings.firebase_client_email)
+)
+if firebase_available:
+    try:
+        import firebase_admin
+        from firebase_admin import auth as firebase_auth, credentials as fb_creds
 
-app = FastAPI(title="Mail AI Manager", version="0.1.0")
+        _firebase_app = firebase_admin.initialize_app(
+            fb_creds.Certificate({
+                "type": "service_account",
+                "project_id": settings.firebase_project_id,
+                "private_key": settings.firebase_private_key.replace("\\n", "\n"),
+                "client_email": settings.firebase_client_email,
+                "token_uri": "https://oauth2.googleapis.com/token",
+            })
+        )
+        _firebase_auth = firebase_auth
+        FIREBASE_STORE = FirebaseStore(
+            FirebaseConfig(
+                project_id=settings.firebase_project_id,
+                private_key=settings.firebase_private_key.replace("\\n", "\n"),
+                client_email=settings.firebase_client_email,
+                token_encryption_key=os.getenv("TOKEN_ENCRYPTION_KEY") or None,
+            ),
+            app=_firebase_app,
+        )
+    except Exception:
+        logger.exception("Failed to initialize Firebase Admin SDK")
+        _firebase_auth = None
+else:
+    _firebase_auth = None
+
+app = FastAPI(title="Aegis Mail", version="0.1.0")
 
 session_secret = settings.session_secret or secrets.token_urlsafe(48)
 if not settings.session_secret:
@@ -82,9 +114,35 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+class COOPMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
+        return response
+
+app.add_middleware(COOPMiddleware)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if FRONTEND_URL.startswith("https://"):
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+class FirebaseAuthRequest(BaseModel):
+    id_token: str
 
 
 def _create_flow(state: str | None = None) -> Flow:
@@ -115,23 +173,57 @@ def _token_path_for_email(email: str) -> Path:
 
 def _require_user_email(request: Request) -> str:
     email = request.session.get("user_email")
-    if not email:
-        raise HTTPException(status_code=401, detail="Not authenticated.")
-    return email
+    if email:
+        return email
+
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and _firebase_auth:
+        token = auth[7:]
+        try:
+            decoded = _firebase_auth.verify_id_token(token)
+            decoded_email = decoded.get("email", "")
+            if decoded_email:
+                uid = decoded.get("uid", "")
+                request.session["firebase_uid"] = uid
+                request.session["user_email"] = decoded_email
+                return decoded_email
+        except Exception:
+            logger.warning("Invalid Bearer token")
+
+    raise HTTPException(status_code=401, detail="Not authenticated.")
 
 
-def _credentials_for_user(email: str) -> OAuth2Credentials | None:
-    # Try Supabase first
-    if SUPABASE_STORE:
-        token_json = SUPABASE_STORE.load_gmail_token(email)
-        if token_json:
-            try:
-                info = json.loads(token_json)
-                return OAuth2Credentials.from_authorized_user_info(info, SCOPES_READONLY)
-            except Exception:
-                logger.exception("Failed to load credentials from Supabase for %s", email)
+def _get_user_id(request: Request) -> str:
+    uid = request.session.get("firebase_uid") or request.session.get("user_email", "")
+    return uid
 
-    # Fallback to local token file
+
+def _persist_token(uid: str) -> callable:
+    def persist(token_json: str) -> None:
+        if not FIREBASE_STORE:
+            return
+        try:
+            FIREBASE_STORE.save_gmail_token(uid, token_json)
+        except Exception:
+            logger.warning("Failed to persist token to Firestore for %s", uid)
+    return persist
+
+
+def _credentials_for_user(email: str, uid: str = "") -> OAuth2Credentials | None:
+    if not uid:
+        uid = email
+    if FIREBASE_STORE:
+        try:
+            token_json = FIREBASE_STORE.load_gmail_token(uid)
+            if token_json:
+                try:
+                    info = json.loads(token_json)
+                    return OAuth2Credentials.from_authorized_user_info(info, SCOPES_READONLY)
+                except Exception:
+                    logger.exception("Failed to load credentials from Firestore for %s", email)
+        except Exception:
+            logger.warning("Firestore unavailable, falling back to local file for %s", email)
+
     token_path = _token_path_for_email(email)
     if token_path.exists():
         try:
@@ -163,7 +255,7 @@ def _summarize_message(
     if gemini:
         try:
             return gemini.summarize(message)
-        except Exception as exc:  # noqa: BLE001 - surface fallback without failing
+        except Exception as exc:
             logger.warning("Gemini failed, using local summarizer: %s", exc)
     return local.summarize(message)
 
@@ -317,8 +409,36 @@ def api_me(request: Request) -> dict:
     return {"user": email}
 
 
+@app.post("/api/auth/firebase")
+def api_auth_firebase(request: Request, body: FirebaseAuthRequest) -> dict:
+    if not _firebase_auth:
+        raise HTTPException(status_code=503, detail="Firebase Auth not configured.")
+    try:
+        decoded = _firebase_auth.verify_id_token(body.id_token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+
+    uid = decoded.get("uid", "")
+    email = decoded.get("email", "")
+    name = decoded.get("name", "")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="No email in Firebase token.")
+
+    if FIREBASE_STORE:
+        try:
+            FIREBASE_STORE.ensure_user(uid, email, name)
+        except Exception:
+            logger.exception("Failed to create user in Firestore")
+
+    request.session["firebase_uid"] = uid
+    request.session["user_email"] = email
+    return {"user": email, "uid": uid}
+
+
 @app.get("/auth/google")
 def auth_google(request: Request) -> RedirectResponse:
+    email = _require_user_email(request)
     flow = _create_flow()
     auth_url, state = flow.authorization_url(
         access_type="offline",
@@ -328,6 +448,20 @@ def auth_google(request: Request) -> RedirectResponse:
     request.session["oauth_state"] = state
     request.session["oauth_code_verifier"] = flow.code_verifier
     return RedirectResponse(auth_url)
+
+
+@app.get("/api/auth/gmail-url")
+def api_gmail_auth_url(request: Request) -> dict:
+    email = _require_user_email(request)
+    flow = _create_flow()
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    request.session["oauth_state"] = state
+    request.session["oauth_code_verifier"] = flow.code_verifier
+    return {"url": auth_url}
 
 
 @app.get("/auth/google/callback")
@@ -355,15 +489,13 @@ def auth_google_callback(request: Request) -> RedirectResponse:
     if not email:
         raise HTTPException(status_code=500, detail="Could not read user profile.")
 
-    # Persist token to Supabase when available, otherwise fall back to local file
+    uid = request.session.get("firebase_uid", email)
     token_json = creds.to_json()
-    if SUPABASE_STORE:
+    if FIREBASE_STORE:
         try:
-            SUPABASE_STORE.ensure_user(email, profile.get("emailAddress"))
-            SUPABASE_STORE.save_gmail_token(email, token_json)
+            FIREBASE_STORE.save_gmail_token(uid, token_json)
         except Exception:
-            logger.exception("Failed to save token to Supabase for %s", email)
-            # fallback to local file
+            logger.exception("Failed to save token to Firestore for %s", email)
             _token_path_for_email(email).write_text(token_json, encoding="utf-8")
     else:
         _token_path_for_email(email).write_text(token_json, encoding="utf-8")
@@ -381,6 +513,48 @@ def auth_logout(request: Request) -> RedirectResponse:
     return RedirectResponse(FRONTEND_URL)
 
 
+def _revoke_google_token(token_json: str) -> None:
+    try:
+        info = json.loads(token_json)
+        token = info.get("access_token") or info.get("token") or ""
+        if token:
+            import urllib.request
+            req = urllib.request.Request(
+                "https://oauth2.googleapis.com/revoke",
+                data=f"token={token}".encode(),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            urllib.request.urlopen(req)
+    except Exception:
+        logger.warning("Failed to revoke Google token")
+
+
+@app.post("/api/auth/delete-account")
+def api_delete_account(request: Request) -> dict:
+    email = _require_user_email(request)
+    uid = _get_user_id(request)
+
+    if FIREBASE_STORE:
+        try:
+            token_json = FIREBASE_STORE.load_gmail_token(uid)
+            if token_json:
+                _revoke_google_token(token_json)
+            FIREBASE_STORE.delete_user_data(uid)
+        except Exception:
+            logger.exception("Failed to delete user data from Firestore")
+
+    token_path = _token_path_for_email(email)
+    if token_path.exists():
+        try:
+            token_path.unlink()
+        except Exception:
+            logger.warning("Failed to delete local token file for %s", email)
+
+    request.session.clear()
+    logger.info("Account deleted for %s (uid=%s)", email, uid)
+    return {"status": "ok"}
+
+
 @app.get("/api/messages")
 def api_messages(
     request: Request,
@@ -389,7 +563,8 @@ def api_messages(
     ai: bool = False,
 ) -> dict:
     email = _require_user_email(request)
-    creds = _credentials_for_user(email)
+    uid = _get_user_id(request)
+    creds = _credentials_for_user(email, uid)
     if not creds:
         raise HTTPException(status_code=401, detail="No token for user.")
 
@@ -399,7 +574,7 @@ def api_messages(
         scopes=SCOPES_READONLY,
         max_body_chars=settings.max_body_chars,
         credentials=creds,
-        persist_token=(lambda t, e=email: SUPABASE_STORE.save_gmail_token(e, t)) if SUPABASE_STORE else None,
+        persist_token=_persist_token(uid),
     )
 
     query_parts = ["in:inbox", "category:primary"]
@@ -483,7 +658,8 @@ def api_messages(
 @app.get("/api/messages/{message_id}/summary")
 def api_message_summary(request: Request, message_id: str) -> dict:
     email = _require_user_email(request)
-    creds = _credentials_for_user(email)
+    uid = _get_user_id(request)
+    creds = _credentials_for_user(email, uid)
     if not creds:
         raise HTTPException(status_code=401, detail="No token for user.")
 
@@ -493,51 +669,37 @@ def api_message_summary(request: Request, message_id: str) -> dict:
         scopes=SCOPES_READONLY,
         max_body_chars=settings.max_body_chars,
         credentials=creds,
-        persist_token=(lambda t, e=email: SUPABASE_STORE.save_gmail_token(e, t)) if SUPABASE_STORE else None,
+        persist_token=_persist_token(uid),
     )
     message = client.get_message(message_id)
 
-    if not settings.groq_api_key:
-        raise HTTPException(status_code=503, detail="Groq API key not configured.")
-
-    # Try cached summary from Supabase
-    if SUPABASE_STORE:
+    if FIREBASE_STORE:
         try:
-            cached = SUPABASE_STORE.load_message_summary(email, message_id)
+            cached = FIREBASE_STORE.load_message_summary(uid, message_id)
             if cached:
                 return cached
         except Exception:
             logger.exception("Failed to load cached summary for %s", message_id)
 
-    summarizer = GroqSummarizer(settings.groq_api_key, settings.groq_model)
-    try:
-        summary = summarizer.summarize(message)
-    except Exception as exc:  # noqa: BLE001 - surface upstream failure
-        logger.warning("Groq summarizer failed: %s", exc)
-        raise HTTPException(
-            status_code=502, detail="Groq summarization failed. Try again."
+    ai_summarizer = None
+    if settings.groq_api_key:
+        ai_summarizer = GroqSummarizer(settings.groq_api_key, settings.groq_model)
+    elif settings.gemini_api_key and not settings.disable_gemini:
+        ai_summarizer = GeminiSummarizer(
+            settings.gemini_api_key, settings.gemini_model
         )
+    local = LocalHeuristicSummarizer()
 
-    # Persist summary to Supabase cache when available
-    if SUPABASE_STORE:
+    summary = _summarize_message(message, ai_summarizer, local)
+
+    if FIREBASE_STORE:
         try:
-            SUPABASE_STORE.save_message_summary(email, message_id, {
+            FIREBASE_STORE.save_message_summary(uid, message_id, {
                 "summary": summary.summary,
                 "action_items": summary.action_items,
-                "concern": summary.concern,
-                "classification": summary.classification,
-                "legitimacy_reason": summary.legitimacy_reason,
-                "why_received": summary.why_received,
-                "unsubscribe_instructions": summary.unsubscribe_instructions,
                 "topic": summary.topic,
                 "provider": summary.provider,
-                "what_it_is": summary.what_it_is,
-                "main_offer": summary.main_offer,
-                "key_benefits": summary.key_benefits,
-                "what_it_contains": summary.what_it_contains,
-                "how_to_open": summary.how_to_open,
-                "important_notes": summary.important_notes,
-                "what_you_should_do": summary.what_you_should_do,
+                "category": summary.category,
             })
         except Exception:
             logger.exception("Failed to save message summary for %s", message_id)
@@ -545,20 +707,9 @@ def api_message_summary(request: Request, message_id: str) -> dict:
     return {
         "summary": summary.summary,
         "action_items": summary.action_items,
-        "concern": summary.concern,
-        "classification": summary.classification,
-        "legitimacy_reason": summary.legitimacy_reason,
-        "why_received": summary.why_received,
-        "unsubscribe_instructions": summary.unsubscribe_instructions,
         "topic": summary.topic,
         "provider": summary.provider,
-        "what_it_is": summary.what_it_is,
-        "main_offer": summary.main_offer,
-        "key_benefits": summary.key_benefits,
-        "what_it_contains": summary.what_it_contains,
-        "how_to_open": summary.how_to_open,
-        "important_notes": summary.important_notes,
-        "what_you_should_do": summary.what_you_should_do,
+        "category": summary.category,
     }
 
 
@@ -567,7 +718,8 @@ def api_attachment(
     request: Request, message_id: str, attachment_id: str
 ) -> Response:
     email = _require_user_email(request)
-    creds = _credentials_for_user(email)
+    uid = _get_user_id(request)
+    creds = _credentials_for_user(email, uid)
     if not creds:
         raise HTTPException(status_code=401, detail="No token for user.")
 
@@ -577,7 +729,7 @@ def api_attachment(
         scopes=SCOPES_READONLY,
         max_body_chars=settings.max_body_chars,
         credentials=creds,
-        persist_token=(lambda t, e=email: SUPABASE_STORE.save_gmail_token(e, t)) if SUPABASE_STORE else None,
+        persist_token=_persist_token(uid),
     )
     data, mime_type, filename = client.get_attachment_by_id(
         message_id, attachment_id
@@ -590,7 +742,8 @@ def api_attachment_part(
     request: Request, message_id: str, part_id: str
 ) -> Response:
     email = _require_user_email(request)
-    creds = _credentials_for_user(email)
+    uid = _get_user_id(request)
+    creds = _credentials_for_user(email, uid)
     if not creds:
         raise HTTPException(status_code=401, detail="No token for user.")
 
@@ -600,7 +753,7 @@ def api_attachment_part(
         scopes=SCOPES_READONLY,
         max_body_chars=settings.max_body_chars,
         credentials=creds,
-        persist_token=(lambda t, e=email: SUPABASE_STORE.save_gmail_token(e, t)) if SUPABASE_STORE else None,
+        persist_token=_persist_token(uid),
     )
     data, mime_type, filename = client.get_attachment_by_part_id(message_id, part_id)
     return _attachment_response(data, mime_type, filename)
