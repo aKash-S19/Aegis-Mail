@@ -362,8 +362,13 @@ export default function App() {
     finally { setLoading(false); }
   }
 
-  function connectGmail() {
-    window.location.href = `${API_BASE}/auth/google`;
+  async function connectGmail() {
+    try {
+      const response = await authFetch("/api/auth/gmail-url");
+      if (!response.ok) throw new Error(`Failed to get Gmail auth URL: ${response.status}`);
+      const data = await response.json();
+      window.location.href = data.url;
+    } catch (err) { setError(String(err)); }
   }
 
   async function logout() {

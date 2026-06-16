@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 from pathlib import Path
+from itsdangerous import URLSafeTimedSerializer
 from typing import Optional, Union
 
 import bleach
@@ -99,12 +100,17 @@ session_secret = settings.session_secret or secrets.token_urlsafe(48)
 if not settings.session_secret:
     logger.warning("SESSION_SECRET is not set; using a temporary in-memory secret.")
 
+state_serializer = URLSafeTimedSerializer(
+    secret_key=session_secret,
+    salt="aegis-oauth-state",
+)
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=session_secret,
     session_cookie="mailai_session",
     max_age=settings.session_max_age,
-    same_site="none",
+    same_site="lax",
     https_only=settings.session_cookie_secure,
 )
 
@@ -418,44 +424,55 @@ def api_auth_firebase(request: Request, body: FirebaseAuthRequest) -> dict:
 @app.get("/auth/google")
 def auth_google(request: Request) -> RedirectResponse:
     email = _require_user_email(request)
+    uid = _get_user_id(request)
     flow = _create_flow()
-    auth_url, state = flow.authorization_url(
+    signed_state = state_serializer.dumps({
+        "code_verifier": flow.code_verifier,
+        "uid": uid,
+    })
+    auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
+        state=signed_state,
     )
-    request.session["oauth_state"] = state
-    request.session["oauth_code_verifier"] = flow.code_verifier
     return RedirectResponse(auth_url)
 
 
 @app.get("/api/auth/gmail-url")
 def api_gmail_auth_url(request: Request) -> dict:
     email = _require_user_email(request)
+    uid = _get_user_id(request)
     flow = _create_flow()
-    auth_url, state = flow.authorization_url(
+    signed_state = state_serializer.dumps({
+        "code_verifier": flow.code_verifier,
+        "uid": uid,
+    })
+    auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
+        state=signed_state,
     )
-    request.session["oauth_state"] = state
-    request.session["oauth_code_verifier"] = flow.code_verifier
     return {"url": auth_url}
 
 
 @app.get("/auth/google/callback")
 def auth_google_callback(request: Request) -> RedirectResponse:
-    state = request.query_params.get("state")
+    raw_state = request.query_params.get("state")
     code = request.query_params.get("code")
-    if not state or not code:
+    if not raw_state or not code:
         raise HTTPException(status_code=400, detail="Missing state or code.")
 
-    session_state = request.session.get("oauth_state")
-    if not session_state or session_state != state:
-        raise HTTPException(status_code=400, detail="Invalid OAuth state.")
+    try:
+        payload = state_serializer.loads(raw_state, max_age=600)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state.")
 
-    flow = _create_flow(state=state)
-    code_verifier = request.session.get("oauth_code_verifier")
+    uid = payload.get("uid", "")
+    code_verifier = payload.get("code_verifier")
+
+    flow = _create_flow(state=raw_state)
     if code_verifier:
         flow.code_verifier = code_verifier
 
@@ -468,7 +485,6 @@ def auth_google_callback(request: Request) -> RedirectResponse:
     if not email:
         raise HTTPException(status_code=500, detail="Could not read user profile.")
 
-    uid = request.session.get("firebase_uid", email)
     token_json = creds.to_json()
     if FIREBASE_STORE:
         try:
@@ -479,9 +495,8 @@ def auth_google_callback(request: Request) -> RedirectResponse:
     else:
         _token_path_for_email(email).write_text(token_json, encoding="utf-8")
 
+    request.session["firebase_uid"] = uid
     request.session["user_email"] = email
-    request.session.pop("oauth_state", None)
-    request.session.pop("oauth_code_verifier", None)
 
     return RedirectResponse(f"{FRONTEND_URL}/auth/callback")
 
