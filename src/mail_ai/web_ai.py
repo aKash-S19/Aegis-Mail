@@ -423,37 +423,45 @@ def api_auth_firebase(request: Request, body: FirebaseAuthRequest) -> dict:
 
 @app.get("/auth/google")
 def auth_google(request: Request) -> RedirectResponse:
+    import urllib.parse as _up
     email = _require_user_email(request)
     uid = _get_user_id(request)
     flow = _create_flow()
-    signed_state = state_serializer.dumps({
-        "code_verifier": flow.code_verifier,
-        "uid": uid,
-    })
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
-        state=signed_state,
     )
+    cv = flow.code_verifier
+    if not cv:
+        raise HTTPException(500, "Failed to generate PKCE code verifier")
+    signed_state = state_serializer.dumps({"code_verifier": cv, "uid": uid})
+    parsed = _up.urlparse(auth_url)
+    qs = _up.parse_qs(parsed.query, keep_blank_values=True)
+    qs["state"] = [signed_state]
+    auth_url = _up.urlunparse(parsed._replace(query=_up.urlencode(qs, doseq=True)))
     return RedirectResponse(auth_url)
 
 
 @app.get("/api/auth/gmail-url")
 def api_gmail_auth_url(request: Request) -> dict:
+    import urllib.parse as _up
     email = _require_user_email(request)
     uid = _get_user_id(request)
     flow = _create_flow()
-    signed_state = state_serializer.dumps({
-        "code_verifier": flow.code_verifier,
-        "uid": uid,
-    })
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
-        state=signed_state,
     )
+    cv = flow.code_verifier
+    if not cv:
+        raise HTTPException(500, "Failed to generate PKCE code verifier")
+    signed_state = state_serializer.dumps({"code_verifier": cv, "uid": uid})
+    parsed = _up.urlparse(auth_url)
+    qs = _up.parse_qs(parsed.query, keep_blank_values=True)
+    qs["state"] = [signed_state]
+    auth_url = _up.urlunparse(parsed._replace(query=_up.urlencode(qs, doseq=True)))
     return {"url": auth_url}
 
 
