@@ -104,7 +104,7 @@ app.add_middleware(
     secret_key=session_secret,
     session_cookie="mailai_session",
     max_age=settings.session_max_age,
-    same_site="lax",
+    same_site="none",
     https_only=settings.session_cookie_secure,
 )
 
