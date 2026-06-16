@@ -3,6 +3,8 @@
   <img alt="Aegis Mail" src="./banner.png">
 </picture>
 
+## Aegis Mail
+
 **Your AI inbox assistant — summarizes emails, explains context, and tells you what to do.**
 
 Stop drowning in email. Aegis connects to your Gmail, runs every message through AI, and gives you a clean, structured breakdown: what it is, why you got it, what matters, and what you should do next.
